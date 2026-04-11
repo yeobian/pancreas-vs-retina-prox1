@@ -41,6 +41,9 @@ MIN_CELLS   = 3
 # ── Census version ────────────────────────────────────────────────────────────
 CENSUS_VERSION = "stable"
 
+# ── Subsample cap (Census returns ~870k cells; cap keeps RAM under control) ───
+MAX_CELLS = 100_000
+
 
 # ── Data fetch ────────────────────────────────────────────────────────────────
 
@@ -81,6 +84,12 @@ def fetch_pancreas() -> ad.AnnData:
         )
 
     print(f"Fetched {adata.n_obs:,} cells × {adata.n_vars:,} genes")
+
+    # Subsample to keep peak RAM manageable on a laptop
+    if adata.n_obs > MAX_CELLS:
+        sc.pp.subsample(adata, n_obs=MAX_CELLS, random_state=42)
+        print(f"Subsampled → {adata.n_obs:,} cells (MAX_CELLS={MAX_CELLS:,})")
+
     return adata
 
 
