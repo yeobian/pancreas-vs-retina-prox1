@@ -138,11 +138,13 @@ def plot_violin(retina: ad.AnnData, pancreas: ad.AnnData, out: Path) -> None:
         )
         sns.violinplot(
             data=sub, x="cell_type", y=TARGET_GENE,
-            order=order, ax=ax, palette="Set2",
-            scale="width", inner="quartile",
+            order=order, ax=ax, hue="cell_type",
+            palette="Set2", density_norm="width",
+            inner="quartile", legend=False,
         )
         ax.set_title(f"{tissue}: {TARGET_GENE} by cell type")
-        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right", fontsize=8)
+        ax.set_xticks(range(len(order)))
+        ax.set_xticklabels(list(order), rotation=45, ha="right", fontsize=8)
         ax.set_xlabel("")
     plt.tight_layout()
     plt.savefig(out, bbox_inches="tight", dpi=150)
@@ -221,15 +223,19 @@ def plot_overlap(comp: dict, out: Path) -> None:
 def run_enrichment(genes: list[str], label: str) -> pd.DataFrame:
     if not genes:
         return pd.DataFrame()
-    gp      = GProfiler(return_dataframe=True)
-    results = gp.profile(
-        organism="hsapiens",
-        query=genes,
-        sources=["GO:BP", "GO:MF", "KEGG", "REAC"],
-        significance_threshold_method="fdr",
-        user_threshold=0.05,
-        no_evidences=False,
-    )
+    try:
+        gp      = GProfiler(return_dataframe=True)
+        results = gp.profile(
+            organism="hsapiens",
+            query=genes,
+            sources=["GO:BP", "GO:MF", "KEGG", "REAC"],
+            significance_threshold_method="fdr",
+            user_threshold=0.05,
+            no_evidences=False,
+        )
+    except Exception as exc:
+        print(f"  {label}: gProfiler unavailable ({type(exc).__name__}) — skipping enrichment.")
+        return pd.DataFrame()
     if results.empty:
         print(f"  {label}: no significant terms (FDR < 0.05)")
     else:
