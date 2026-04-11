@@ -77,26 +77,52 @@ def _load_10x(sample_dir: Path, sample_id: str) -> ad.AnnData:
 
 def _load_tsv(tsv_path: Path, sample_id: str) -> "ad.AnnData | None":
     """
-    Load a gzipped gene×cell TSV. Auto-detects orientation.
-    Returns None if the file has no cell data (e.g. it is a barcodes/feature list).
-    """
-    df = pd.read_csv(tsv_path, sep="\t", index_col=0)
+    Load a gzipped expression matrix TSV (tab or space-delimited).
 
-    if df.shape[1] == 0:
-        # File is a 1-column list (barcodes or gene names), not an expression matrix
+    Handles GEO files where:
+    - delimiter is whitespace rather than tab
+    - leading columns are string metadata (barcode, cluster, sample name)
+    - only the trailing numeric columns are expression values
+
+    Returns None if the file has no usable expression data.
+    """
+    # Try tab first; fall back to generic whitespace (many GEO files use spaces)
+    df = None
+    for sep in ("\t", r"\s+"):
+        try:
+            _df = pd.read_csv(tsv_path, sep=sep, index_col=0, engine="python")
+            if _df.shape[1] > 0:
+                df = _df
+                break
+        except Exception:
+            continue
+
+    if df is None or df.shape[1] == 0:
         return None
 
-    # Determine orientation: if #rows >> #cols assume genes×cells, else cells×genes
-    if df.shape[0] >= df.shape[1]:
-        X        = df.T.values.astype("float32")
-        obs_names = list(df.columns)   # cell barcodes
-        var_names = list(df.index)     # gene names
-    else:
-        X        = df.values.astype("float32")
-        obs_names = list(df.index)     # cell barcodes
-        var_names = list(df.columns)   # gene names
+    # Separate string (metadata) columns from numeric (expression) columns.
+    obj_cols = [c for c in df.columns if df[c].dtype == object]
+    num_cols  = [c for c in df.columns if df[c].dtype != object]
 
-    if len(obs_names) == 0:
+    if obj_cols:
+        # First string column is typically cell barcodes
+        obs_names = [str(bc).strip('"') for bc in df[obj_cols[0]]]
+    else:
+        # No string columns — index should be barcodes (or row numbers)
+        obs_names = [str(bc).strip('"') for bc in df.index]
+
+    if not num_cols:
+        return None
+
+    X         = df[num_cols].values.astype("float32")
+    var_names = [str(c).strip('"') for c in num_cols]
+
+    # If matrix looks transposed (very few rows, many cols), flip it
+    if X.shape[0] < 5 and X.shape[1] > X.shape[0] * 10:
+        X         = X.T
+        obs_names, var_names = var_names, obs_names
+
+    if len(obs_names) == 0 or X.shape[0] == 0:
         return None
 
     adata = ad.AnnData(X=X)
