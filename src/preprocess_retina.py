@@ -75,76 +75,135 @@ def _load_10x(sample_dir: Path, sample_id: str) -> ad.AnnData:
     return _attach_meta(adata, sample_id)
 
 
-def _load_tsv(tsv_path: Path, sample_id: str) -> ad.AnnData:
-    """Load a gzipped gene×cell TSV (rows=genes, cols=cells)."""
+def _load_tsv(tsv_path: Path, sample_id: str) -> "ad.AnnData | None":
+    """
+    Load a gzipped gene×cell TSV. Auto-detects orientation.
+    Returns None if the file has no cell data (e.g. it is a barcodes/feature list).
+    """
     df = pd.read_csv(tsv_path, sep="\t", index_col=0)
-    adata = ad.AnnData(X=df.T.values.astype("float32"))
-    adata.obs_names = list(df.columns)
-    adata.var_names = list(df.index)
+
+    if df.shape[1] == 0:
+        # File is a 1-column list (barcodes or gene names), not an expression matrix
+        return None
+
+    # Determine orientation: if #rows >> #cols assume genes×cells, else cells×genes
+    if df.shape[0] >= df.shape[1]:
+        X        = df.T.values.astype("float32")
+        obs_names = list(df.columns)   # cell barcodes
+        var_names = list(df.index)     # gene names
+    else:
+        X        = df.values.astype("float32")
+        obs_names = list(df.index)     # cell barcodes
+        var_names = list(df.columns)   # gene names
+
+    if len(obs_names) == 0:
+        return None
+
+    adata = ad.AnnData(X=X)
+    adata.obs_names = obs_names
+    adata.var_names = var_names
     return _attach_meta(adata, sample_id)
+
+
+def _build_10x_tmp(sid: str, source_files) -> Path:
+    """Copy GSM-prefixed 10X files into a clean tmp dir that sc.read_10x_mtx expects."""
+    tmp = RETINA_RAW_DIR / f"_tmp_{sid}"
+    tmp.mkdir(exist_ok=True)
+    for f in source_files:
+        # Strip the GSM prefix (and optional long sample title) so scanpy finds
+        # the standard names: matrix.mtx.gz, barcodes.tsv.gz, features/genes.tsv.gz
+        stem = f.name
+        for prefix in (f"{sid}_", sid):
+            if stem.startswith(prefix):
+                stem = stem[len(prefix):]
+                break
+        dest = tmp / stem
+        if not dest.exists():
+            shutil.copy(f, dest)
+    return tmp
 
 
 def load_all_samples() -> ad.AnnData:
     """
     Detect the file format inside RETINA_RAW_DIR and load all samples.
 
-    Supported layouts
-    -----------------
-    A) One sub-directory per sample containing MTX + barcodes + features files
-       (standard 10X CellRanger output):
-         RETINA_RAW_DIR/GSM4037981/matrix.mtx.gz
-                                   barcodes.tsv.gz
-                                   features.tsv.gz   ← or genes.tsv.gz
+    Layouts tried in order
+    ----------------------
+    A) Sub-directory named exactly after the GSM accession:
+         RETINA_RAW_DIR/GSM4037981/matrix.mtx.gz  barcodes.tsv.gz  features.tsv.gz
 
-    B) Flat directory with per-sample MTX triplets named with the GSM prefix:
-         RETINA_RAW_DIR/GSM4037981_matrix.mtx.gz  (etc.)
+    B) Any sub-directory (e.g. named after sample title) that contains .mtx files.
+       Sub-directories are matched to samples in accession order.
 
-    C) Per-sample TSV expression files:
+    C) Flat directory: per-sample files with GSM prefix and any .mtx in the name:
+         RETINA_RAW_DIR/GSM4037981_matrix.mtx.gz  (or any other .mtx name)
+
+    D) Flat directory: per-sample dense TSV expression matrix (genes × cells):
          RETINA_RAW_DIR/GSM4037981_expression.tsv.gz
+       Files that load with 0 data columns (barcodes/feature lists) are skipped.
     """
-    adatas = []
+    # ── Print first few files for diagnosis ───────────────────────────────────
+    all_files = sorted(RETINA_RAW_DIR.iterdir())
+    print(f"  Raw directory contains {len(all_files)} entries. First 6:")
+    for f in all_files[:6]:
+        print(f"    {f.name}")
 
-    for sid in SAMPLE_META:
-        # ── Layout A: sub-directory with MTX files ──
+    # ── Layout B: collect all subdirectories that contain .mtx files ──────────
+    mtx_subdirs = sorted(
+        d for d in RETINA_RAW_DIR.iterdir()
+        if d.is_dir() and not d.name.startswith("_tmp") and any(d.glob("*.mtx*"))
+    )
+
+    adatas = []
+    sample_ids = list(SAMPLE_META.keys())
+
+    for i, sid in enumerate(sample_ids):
+        # ── Layout A: subdirectory named after the GSM accession ──
         sdir = RETINA_RAW_DIR / sid
         if sdir.exists() and any(sdir.glob("*.mtx*")):
-            print(f"  {sid}  [10X subdir]")
+            print(f"  {sid}  [10X subdir — GSM name]")
             adatas.append(_load_10x(sdir, sid))
             continue
 
-        # ── Layout B: flat MTX files prefixed by GSM id ──
-        mtx_hits = sorted(RETINA_RAW_DIR.glob(f"{sid}*matrix.mtx*"))
+        # ── Layout B: any subdirectory (matched by position to sample list) ──
+        if i < len(mtx_subdirs):
+            print(f"  {sid}  [10X subdir — {mtx_subdirs[i].name}]")
+            adatas.append(_load_10x(mtx_subdirs[i], sid))
+            continue
+
+        # ── Layout C: flat directory, any .mtx file with this GSM prefix ──
+        mtx_hits = sorted(RETINA_RAW_DIR.glob(f"{sid}*.mtx*"))
         if mtx_hits:
-            print(f"  {sid}  [flat MTX]")
-            tmp = RETINA_RAW_DIR / f"_tmp_{sid}"
-            tmp.mkdir(exist_ok=True)
-            for f in RETINA_RAW_DIR.glob(f"{sid}*"):
-                # strip the GSM prefix so scanpy finds matrix.mtx.gz etc.
-                stem = f.name.replace(f"{sid}_", "")
-                dest = tmp / stem
-                if not dest.exists():
-                    shutil.copy(f, dest)
+            print(f"  {sid}  [flat MTX — {mtx_hits[0].name}]")
+            tmp = _build_10x_tmp(sid, RETINA_RAW_DIR.glob(f"{sid}*"))
             adatas.append(_load_10x(tmp, sid))
             continue
 
-        # ── Layout C: TSV expression files ──
-        tsv_hits = (
-            sorted(RETINA_RAW_DIR.glob(f"{sid}*expression*.tsv.gz"))
-            or sorted(RETINA_RAW_DIR.glob(f"{sid}*.tsv.gz"))
-        )
-        if tsv_hits:
-            print(f"  {sid}  [TSV]")
-            adatas.append(_load_tsv(tsv_hits[0], sid))
-            continue
-
-        print(f"  {sid}  WARNING: no data found — skipping.", file=sys.stderr)
+        # ── Layout D: TSV expression matrix ──
+        # Explicitly exclude barcodes / features / genes list files
+        SKIP_KEYWORDS = ("barcodes", "features", "genes", "annotation")
+        tsv_candidates = [
+            f for f in sorted(RETINA_RAW_DIR.glob(f"{sid}*.tsv*"))
+            if not any(kw in f.name.lower() for kw in SKIP_KEYWORDS)
+        ]
+        for tsv_path in tsv_candidates:
+            result = _load_tsv(tsv_path, sid)
+            if result is not None:
+                print(f"  {sid}  [TSV — {tsv_path.name}]")
+                adatas.append(result)
+                break
+        else:
+            print(f"  {sid}  WARNING: no usable data found — skipping.", file=sys.stderr)
 
     if not adatas:
+        # Last-resort diagnostic
         print(
-            f"\nERROR: No samples loaded from {RETINA_RAW_DIR}.\n"
-            "Run download_data.py first and verify the tar was extracted correctly.",
+            f"\nERROR: No samples could be loaded from {RETINA_RAW_DIR}.\n"
+            "Full file listing:",
             file=sys.stderr,
         )
+        for f in all_files[:30]:
+            print(f"  {f.name}", file=sys.stderr)
         sys.exit(1)
 
     print(f"\nLoaded {len(adatas)} / {len(SAMPLE_META)} samples — concatenating …")
