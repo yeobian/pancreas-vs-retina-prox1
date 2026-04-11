@@ -77,7 +77,7 @@ def fetch_pancreas() -> ad.AnnData:
             census=census,
             organism="Homo sapiens",
             obs_value_filter="tissue_general == 'pancreas'",
-            column_names={"obs": obs_cols},
+            obs_column_names=obs_cols,
         )
 
     print(f"Fetched {adata.n_obs:,} cells × {adata.n_vars:,} genes")
@@ -125,7 +125,7 @@ def preprocess(adata: ad.AnnData) -> ad.AnnData:
     sc.tl.pca(adata, svd_solver="arpack", n_comps=50)
     sc.pp.neighbors(adata, n_neighbors=15, n_pcs=30)
     sc.tl.umap(adata)
-    sc.tl.leiden(adata, resolution=0.5, key_added="leiden")
+    sc.tl.leiden(adata, resolution=0.5, key_added="leiden", flavor="igraph", n_iterations=2, directed=False)
 
     return adata
 
