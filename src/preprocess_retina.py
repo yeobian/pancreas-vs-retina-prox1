@@ -271,10 +271,15 @@ def preprocess(adata: ad.AnnData) -> ad.AnnData:
 
     sc.pp.scale(adata, max_value=10)
 
-    sc.tl.pca(adata, svd_solver="arpack", n_comps=50)
-    sc.pp.neighbors(adata, n_neighbors=15, n_pcs=30)
-    sc.tl.umap(adata)
-    sc.tl.leiden(adata, resolution=0.5, key_added="leiden", flavor="igraph", n_iterations=2, directed=False)
+    sc.tl.pca(adata, svd_solver="arpack", n_comps=50, random_state=42)
+
+    # Harmony batch correction over donor
+    print("  Running Harmony batch correction (key='donor') …")
+    sc.external.pp.harmony_integrate(adata, key="donor", random_state=42)
+
+    sc.pp.neighbors(adata, n_neighbors=15, n_pcs=30, use_rep="X_pca_harmony")
+    sc.tl.umap(adata, random_state=42)
+    sc.tl.leiden(adata, resolution=0.5, key_added="leiden", flavor="igraph", n_iterations=2, directed=False, random_state=42)
 
     return adata
 
